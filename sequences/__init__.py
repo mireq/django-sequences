@@ -5,7 +5,7 @@ POSTGRESQL_UPSERT = """
         INSERT INTO sequences_sequence (name, last)
              VALUES (%s, %s)
         ON CONFLICT (name)
-      DO UPDATE SET last = sequences_sequence.last + 1
+      DO UPDATE SET last = sequences_sequence.last + %d
           RETURNING last;
 """
 
@@ -13,7 +13,7 @@ MYSQL_UPSERT = """
         INSERT INTO sequences_sequence (name, last)
              VALUES (%s, %s)
    ON DUPLICATE KEY
-             UPDATE last = sequences_sequence.last + 1
+             UPDATE last = sequences_sequence.last + %d
 """
 
 SELECT = """
@@ -25,7 +25,7 @@ SELECT = """
 
 def get_next_value(
         sequence_name='default', initial_value=1, reset_value=None,
-        *, nowait=False, using=None):
+        *, nowait=False, using=None, allocate=1):
     """
     Return the next value for a given sequence.
 
@@ -33,8 +33,10 @@ def get_next_value(
     # Inner import because models cannot be imported before their application.
     from .models import Sequence
 
+    initial_value_after_allcoate = initial_value + allocate - 1
+
     if reset_value is not None:
-        assert initial_value < reset_value
+        assert initial_value_after_allocate < reset_value
 
     if using is None:
         using = router.db_for_write(Sequence)
@@ -53,7 +55,7 @@ def get_next_value(
         # This is about 3x faster as the naive implementation.
 
         with connection.cursor() as cursor:
-            cursor.execute(POSTGRESQL_UPSERT, [sequence_name, initial_value])
+            cursor.execute(POSTGRESQL_UPSERT, [sequence_name, initial_value_after_allocate, allocate])
             last, = cursor.fetchone()
         return last
 
@@ -68,7 +70,7 @@ def get_next_value(
 
         with transaction.atomic(using=using, savepoint=False):
             with connection.cursor() as cursor:
-                cursor.execute(MYSQL_UPSERT, [sequence_name, initial_value])
+                cursor.execute(MYSQL_UPSERT, [sequence_name, initial_value_after_allocate, allocate])
                 cursor.execute(SELECT, [sequence_name])
                 last, = cursor.fetchone()
         return last
@@ -82,13 +84,13 @@ def get_next_value(
                 Sequence.objects
                         .select_for_update(nowait=nowait)
                         .get_or_create(name=sequence_name,
-                                       defaults={'last': initial_value})
+                                       defaults={'last': initial_value_after_allocate})
             )
 
             if not created:
-                sequence.last += 1
+                sequence.last += allocate
                 if reset_value is not None and sequence.last >= reset_value:
-                    sequence.last = initial_value
+                    sequence.last = initial_value_after_allocate
                 sequence.save()
 
             return sequence.last
